@@ -4,6 +4,7 @@ from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
 from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_required, JWTManager
 import bcrypt
+from flask_cors import CORS
 from dotenv import load_dotenv
 from datetime import timedelta
 import os
@@ -13,6 +14,9 @@ import uuid
 load_dotenv()
 
 app = Flask(__name__)
+
+#CORS from react app
+CORS(app, origins=["http://localhost:3000"]) 
 
 # Database configuration
 DB_CONFIG = {
