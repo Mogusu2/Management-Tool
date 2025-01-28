@@ -26,7 +26,8 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph
 from reportlab.lib.styles import getSampleStyleSheet
-from paypalrestsdk import configure, Payment as PayPalPayment
+import paypalrestsdk
+from paypalrestsdk import Payment as PayPalPayment
 
 # Load environment variables
 load_dotenv()
@@ -51,10 +52,10 @@ app.config["MAIL_USERNAME"] = os.getenv("EMAIL_USER")
 app.config["MAIL_PASSWORD"] = os.getenv("EMAIL_PASS")
 
 # PayPal Configuration
-configure({
-    "mode": os.getenv("PAYPAL_MODE"),
-    "client_id": os.getenv("PAYPAL_CLIENT_ID"),
-    "client_secret": os.getenv("PAYPAL_SECRET"),
+paypalrestsdk.configure({
+    'mode': 'sandbox',  # or 'live' for production
+    'client_id': os.environ.get('PAYPAL_CLIENT_ID'),
+    'client_secret': os.environ.get('PAYPAL_CLIENT_SECRET')
 })
 
 # Initialize extensions
