@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
@@ -6,199 +6,318 @@ from flask_jwt_extended import create_access_token, get_jwt_identity, jwt_requir
 import bcrypt
 from flask_cors import CORS
 from dotenv import load_dotenv
-from datetime import timedelta
+from datetime import datetime, timedelta
+from functools import wraps
 import os
 import uuid
+from reportlab.pdfgen import canvas
+from io import BytesIO
 
 # Load environment variables
 load_dotenv()
 
+# Initialize Flask app
 app = Flask(__name__)
 
-#CORS from react app
-CORS(app, origins=["http://localhost:3000"]) 
+# Configure CORS for React app
+CORS(app, origins=["http://localhost:3000"])
 
-# Database configuration
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST"),
-    "port": os.getenv("DB_PORT"),
-}
-app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{DB_CONFIG['user']}:{DB_CONFIG['password']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['dbname']}"
+# Supabase PostgreSQL Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = f"postgresql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# JWT configuration
+# JWT Configuration
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
-jwt = JWTManager(app)
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=1)
 
+# Initialize extensions
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
-mallow = Marshmallow(app)
+ma = Marshmallow(app)
+jwt = JWTManager(app)
 
-# Models
-class Role(db.Model):
-    __tablename__ = "role"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    name = db.Column(db.String(100), nullable=False, unique=True)
-    members = db.relationship('Member', back_populates="role")
+# --------------------------
+# Database Models
+# --------------------------
 
-class Member(db.Model):
-    __tablename__ = "member"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(250), nullable=False, unique=True)
-    password = db.Column(db.String(500), nullable=False)
-    role_id = db.Column(db.Integer, db.ForeignKey('role.id', ondelete='CASCADE'), nullable=False)
-    role = db.relationship("Role", back_populates="members")
+class User(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(256), nullable=False)
+    role = db.Column(db.String(20), nullable=False)  # admin, employee, freelancer
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    budgets = db.relationship('Budget', backref='user', lazy=True)
+    expenses = db.relationship('Expense', backref='user', lazy=True)
+    invoices = db.relationship('Invoice', backref='user', lazy=True)
 
 class Budget(db.Model):
-    __tablename__ = "budget"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    name = db.Column(db.String(100), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    member_id = db.Column(db.Integer, db.ForeignKey('member.id', ondelete='CASCADE'), nullable=False)
-
-    invoices = db.relationship("Invoice", back_populates="budget")
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    category = db.Column(db.String(50), nullable=False)
+    monthly_limit = db.Column(db.Float, nullable=False)
+    current_spending = db.Column(db.Float, default=0.0)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
+    expenses = db.relationship('Expense', backref='budget', lazy=True)
 
 class Expense(db.Model):
-    __tablename__ = "expense"
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    description = db.Column(db.String(250), nullable=False)
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    budget_id = db.Column(db.String(36), db.ForeignKey('budget.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    budget_id = db.Column(db.Integer, db.ForeignKey('budget.id', ondelete='CASCADE'), nullable=False)
-    member_id = db.Column(db.Integer, db.ForeignKey('member.id', ondelete='CASCADE'), nullable=False)
+    description = db.Column(db.Text)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
 
 class Invoice(db.Model):
-    __tablename__ = "invoice"
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = db.Column(db.String(36), db.ForeignKey('user.id'), nullable=False)
+    client_name = db.Column(db.String(100), nullable=False)
+    client_email = db.Column(db.String(120), nullable=False)
+    items = db.Column(db.JSON, nullable=False)
+    total = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(20), default='pending')
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
 
-    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    number = db.Column(db.String(50), unique=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=db.func.now())
+class Payment(db.Model):
+    id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    invoice_id = db.Column(db.String(36), db.ForeignKey('invoice.id'), nullable=False)
     amount = db.Column(db.Float, nullable=False)
-    budget_id = db.Column(db.Integer, db.ForeignKey("budget.id"), nullable=False)
+    method = db.Column(db.String(20), nullable=False)  # mpesa, paypal
+    transaction_id = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, server_default=db.func.now())
 
-    budget = db.relationship("Budget", back_populates="invoices")
+# --------------------------
+# Marshmallow Schemas
+# --------------------------
 
-
-# Schemas
-class RoleSchema(mallow.SQLAlchemyAutoSchema):
+class UserSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
-        model = Role
-        include_relationships = True
-        load_instance = True
+        model = User
+        exclude = ('password',)
 
-class MemberSchema(mallow.SQLAlchemyAutoSchema):
-    class Meta:
-        model = Member
-        include_fk = True
-        load_instance = True
-
-class BudgetSchema(mallow.SQLAlchemyAutoSchema):
+class BudgetSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Budget
-        include_fk = True
-        load_instance = True
 
-class ExpenseSchema(mallow.SQLAlchemyAutoSchema):
+class ExpenseSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Expense
-        include_fk = True
-        load_instance = True
 
-member_schema = MemberSchema()
-members_schema = MemberSchema(many=True)
+class InvoiceSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Invoice
+
+class PaymentSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Payment
+
+# Initialize schemas
+user_schema = UserSchema()
 budget_schema = BudgetSchema()
-budgets_schema = BudgetSchema(many=True)
 expense_schema = ExpenseSchema()
-expenses_schema = ExpenseSchema(many=True)
+invoice_schema = InvoiceSchema()
+payment_schema = PaymentSchema()
 
-# Routes
-@app.route("/sign-up", methods=["POST"])
-def signup():
+# --------------------------
+# Utility Functions
+# --------------------------
+
+def role_required(roles):
+    def decorator(fn):
+        @wraps(fn)
+        @jwt_required()
+        def wrapper(*args, **kwargs):
+            current_user = get_jwt_identity()
+            if current_user['role'] not in roles:
+                return jsonify({"message": "Unauthorized access"}), 403
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# --------------------------
+# Authentication Routes
+# --------------------------
+
+@app.route('/register', methods=['POST'])
+def register():
     data = request.get_json()
-    name = data.get('name')
-    email = data.get('email')
-    role_id = data.get('role_id')
-    password = data.get('password')
+    
+    if User.query.filter_by(username=data['username']).first():
+        return jsonify({"message": "Username already exists"}), 400
+        
+    if User.query.filter_by(email=data['email']).first():
+        return jsonify({"message": "Email already exists"}), 400
 
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-
-    new_member = Member(name=name, email=email, role_id=role_id, password=hashed.decode('utf8'))
-    db.session.add(new_member)
+    hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
+    
+    new_user = User(
+        id=str(uuid.uuid4()),
+        username=data['username'],
+        email=data['email'],
+        password=hashed_password.decode('utf-8'),
+        role=data['role']
+    )
+    
+    db.session.add(new_user)
     db.session.commit()
+    
+    return jsonify({
+        "message": "User created successfully",
+        "user": user_schema.dump(new_user)
+    }), 201
 
-    return jsonify({"message": "Sign-up successful"})
-
-@app.route("/login", methods=["POST"])
+@app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
-    email = data.get("email")
-    password = data.get("password")
-    member = Member.query.filter_by(email=email).first()
+    user = User.query.filter_by(username=data['username']).first()
+    
+    if user and bcrypt.checkpw(data['password'].encode('utf-8'), user.password.encode('utf-8')):
+        access_token = create_access_token(identity={
+            'id': user.id,
+            'username': user.username,
+            'role': user.role
+        })
+        return jsonify(access_token=access_token), 200
+        
+    return jsonify({"message": "Invalid credentials"}), 401
 
-    if not member or not bcrypt.checkpw(password.encode('utf-8'), member.password.encode('utf-8')):
-        return jsonify({"message": "Invalid email or password"}), 400
+# --------------------------
+# Budget Routes
+# --------------------------
 
-    access_token = create_access_token(identity=member.id, expires_delta=timedelta(days=1))
-    return jsonify({"message": f"Welcome {member.name}", "access_token": access_token})
-
-@app.route("/budgets", methods=["POST"])
+@app.route('/budgets', methods=['GET', 'POST'])
 @jwt_required()
-def create_budget():
-    data = request.get_json()
+def manage_budgets():
     current_user = get_jwt_identity()
-    new_budget = Budget(name=data['name'], amount=data['amount'], member_id=current_user)
-    db.session.add(new_budget)
-    db.session.commit()
-    return budget_schema.jsonify(new_budget)
+    user = User.query.get(current_user['id'])
+    
+    if request.method == 'GET':
+        budgets = Budget.query.filter_by(user_id=user.id).all()
+        return jsonify(budget_schema.dump(budgets, many=True)), 200
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        new_budget = Budget(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            category=data['category'],
+            monthly_limit=data['monthly_limit']
+        )
+        db.session.add(new_budget)
+        db.session.commit()
+        return jsonify(budget_schema.dump(new_budget)), 201
 
-@app.route("/expenses", methods=["POST"])
+# --------------------------
+# Expense Routes
+# --------------------------
+
+@app.route('/expenses', methods=['GET', 'POST'])
 @jwt_required()
-def log_expense():
-    data = request.get_json()
+def manage_expenses():
     current_user = get_jwt_identity()
-    new_expense = Expense(description=data['description'], amount=data['amount'], budget_id=data['budget_id'], member_id=current_user)
-    db.session.add(new_expense)
-    db.session.commit()
-    return expense_schema.jsonify(new_expense)
+    user = User.query.get(current_user['id'])
+    
+    if request.method == 'GET':
+        expenses = Expense.query.filter_by(user_id=user.id).all()
+        return jsonify(expense_schema.dump(expenses, many=True)), 200
+    
+    if request.method == 'POST':
+        data = request.get_json()
+        budget = Budget.query.get(data['budget_id'])
+        
+        if not budget:
+            return jsonify({"message": "Budget not found"}), 404
+            
+        new_expense = Expense(
+            id=str(uuid.uuid4()),
+            user_id=user.id,
+            budget_id=budget.id,
+            amount=data['amount'],
+            description=data.get('description')
+        )
+        
+        budget.current_spending += data['amount']
+        db.session.add(new_expense)
+        db.session.commit()
+        return jsonify(expense_schema.dump(new_expense)), 201
 
-@app.route("/invoices", methods=["POST"])
+# --------------------------
+# Invoice Routes
+# --------------------------
+
+@app.route('/invoices', methods=['POST'])
 @jwt_required()
 def create_invoice():
+    current_user = get_jwt_identity()
     data = request.get_json()
-    budget_id = data.get("budget_id")
-    amount = data.get("amount")
-
-    # Validate budget exists
-    budget = Budget.query.get(budget_id)
-    if not budget:
-        return jsonify({"message": "Budget not found"}), 404
-
-    # Generate invoice number
-    invoice_number = f"INV-{uuid.uuid4().hex[:8].upper()}"
-
-    new_invoice = Invoice(number=invoice_number, amount=amount, budget_id=budget_id)
+    
+    total = sum(item['amount'] for item in data['items'])
+    
+    new_invoice = Invoice(
+        id=str(uuid.uuid4()),
+        user_id=current_user['id'],
+        client_name=data['client_name'],
+        client_email=data['client_email'],
+        items=data['items'],
+        total=total
+    )
+    
     db.session.add(new_invoice)
     db.session.commit()
+    
+    # Generate PDF
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer)
+    p.drawString(100, 750, f"Invoice #{new_invoice.id}")
+    p.drawString(100, 730, f"Client: {new_invoice.client_name}")
+    y = 700
+    for item in new_invoice.items:
+        p.drawString(100, y, f"{item['description']}: ${item['amount']}")
+        y -= 20
+    p.drawString(100, y-20, f"Total: ${new_invoice.total}")
+    p.showPage()
+    p.save()
+    
+    buffer.seek(0)
+    return send_file(buffer, mimetype='application/pdf', download_name=f"invoice_{new_invoice.id}.pdf")
 
-    return jsonify({"message": "Invoice created", "invoice": invoice_number})
+# --------------------------
+# Report Routes
+# --------------------------
 
-
-@app.route("/reports/budget-utilization", methods=["GET"])
+@app.route('/reports', methods=['GET'])
 @jwt_required()
-def budget_utilization():
-    # Aggregate data
-    budgets = Budget.query.all()
-    report = [
-        {"name": b.name, "utilized": sum(e.amount for e in b.expenses), "total": b.amount}
-        for b in budgets
-    ]
+def generate_report():
+    current_user = get_jwt_identity()
+    user = User.query.get(current_user['id'])
+    
+    # Generate expense report
+    buffer = BytesIO()
+    p = canvas.Canvas(buffer)
+    p.drawString(100, 750, f"Expense Report for {user.username}")
+    y = 730
+    for expense in user.expenses:
+        p.drawString(100, y, f"{expense.created_at.date()} - {expense.budget.category}: ${expense.amount}")
+        y -= 20
+    p.showPage()
+    p.save()
+    
+    buffer.seek(0)
+    return send_file(buffer, mimetype='application/pdf', download_name="expense_report.pdf")
 
-    return jsonify({"report": report})
+# --------------------------
+# Admin Routes
+# --------------------------
 
+@app.route('/admin/users', methods=['GET'])
+@role_required(['admin'])
+def get_all_users():
+    users = User.query.all()
+    return jsonify(user_schema.dump(users, many=True)), 200
 
+# --------------------------
+# Main Application
+# --------------------------
 
 if __name__ == '__main__':
     app.run(debug=True)
