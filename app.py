@@ -1,4 +1,5 @@
 from flask import Flask, jsonify, request, send_file
+import requests
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_marshmallow import Marshmallow
@@ -529,7 +530,16 @@ def generate_mpesa_password():
 
 def generate_mpesa_timestamp():
     return datetime.now().strftime("%Y%m%d%H%M%S")
+def get_mpesa_access_token():
+    consumer_key = os.getenv("MPESA_CONSUMER_KEY")
+    consumer_secret = os.getenv("MPESA_CONSUMER_SECRET")
+    api_url = os.getenv("MPESA_TOKEN_URL")
+    response = requests.get(api_url, auth=(consumer_key, consumer_secret))
+    if response.status_code == 200:
+        return response.json()["access_token"]
+    return None
 
+@app.route("/payments/mpesa", methods=["POST"])
 @app.route("/payments/mpesa", methods=["POST"])
 @jwt_required()
 def initiate_mpesa_payment():
