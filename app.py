@@ -1,3 +1,5 @@
+from sqlalchemy.exc import OperationalError
+from psycopg2.errors import OperationalError as PsycopgOperationalError
 from flask import Flask, jsonify, request, send_file
 import requests
 from flask_sqlalchemy import SQLAlchemy
@@ -8,11 +10,14 @@ from flask_jwt_extended import (
     get_jwt_identity,
     jwt_required,
     JWTManager,
+    decode_token,
 )
 from flask_cors import CORS
 from flask_mail import Mail, Message
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+from flask_jwt_extended.exceptions import NoAuthorizationError
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from functools import wraps
@@ -34,9 +39,10 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:3000"])
 
+CORS(app, resources={r"/*": {"origins": "*"}})
 
+app.config['JSON_AS_ASCII'] = False  # Ensure proper JSON handling
 
 # Database Configuration
 # DATABASE_URL is set using environment variables in the app.config
@@ -54,7 +60,11 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 # JWT Configuration
 app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY")
 app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=1)
+app.config["JWT_TOKEN_LOCATION"] = ["headers"]
+app.config["JWT_HEADER_NAME"] = "Authorization"
+app.config["JWT_HEADER_TYPE"] = "Bearer"
 
+jwt = JWTManager(app)  # Initialize after config
 # Email Configuration
 app.config["MAIL_SERVER"] = "smtp.gmail.com"
 app.config["MAIL_PORT"] = 587
@@ -83,6 +93,7 @@ limiter = Limiter(
     default_limits=["200 per day", "50 per hour"]
 )
 
+
 # --------------------------
 # Database Models
 # --------------------------
@@ -106,6 +117,7 @@ class Budget(db.Model):
     current_spending = db.Column(db.Float, default=0.0)
     created_at = db.Column(db.DateTime, server_default=db.func.now())
     expenses = db.relationship("Expense", backref="budget", lazy=True)
+    status = db.Column(db.String(20), default='pending')
 
 class Expense(db.Model):
     id = db.Column(db.String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
@@ -180,6 +192,7 @@ def role_required(roles):
         return wrapper
     return decorator
 
+
 # --------------------------
 # Authentication Routes
 # --------------------------
@@ -213,47 +226,235 @@ def register():
     
     return jsonify(user_schema.dump(new_user)), 201
 
+# --------------------------
+# Verify Token Generatorclear
+
+def generate_token(user):
+    access_token = create_access_token(
+        identity=user.id,
+        additional_claims={
+            'role': user.role.lower(),  # Ensure lowercase consistency
+            'email': user.email
+        }
+    )
+    return access_token
+
+
 @app.route("/login", methods=["POST"])
-@limiter.limit("5 per minute")
 def login():
-    data = request.get_json()
-    user = User.query.filter_by(username=data["username"]).first()
+    try:
+        data = request.get_json(force=True)
+        user = User.query.filter_by(username=data["username"]).first()
 
-    if not user or not bcrypt.checkpw(data["password"].encode("utf-8"), user.password.encode("utf-8")):
-        return jsonify({"message": "Invalid credentials"}), 401
+        if not user or not bcrypt.checkpw(data["password"].encode("utf-8"), user.password.encode("utf-8")):
+            return jsonify({"message": "Invalid credentials"}), 401
 
-    access_token = create_access_token(identity={
-        "id": user.id,
-        "username": user.username,
-        "role": user.role
-    })
-    
-    return jsonify(access_token=access_token), 200
+        # Create token with explicit freshness
+        access_token = create_access_token(
+            identity={
+                "id": user.id,
+                "username": user.username,
+                "role": user.role
+            },
+            fresh=True,
+            expires_delta=timedelta(hours=1)
+        )
+
+        return jsonify({
+            "access_token": access_token,
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "role": user.role
+            }
+        }), 200
+
+    except Exception as e:
+        print(f"Login error: {str(e)}")
+        return jsonify({"message": "Server error"}), 500
+
+
 
 # --------------------------
+# Admin Routes
+# --------------------------
+# --------------------------
+# Admin Routes
+# --------------------------
+
+@app.route('/admin/users', methods=['GET'])
+@role_required(['admin'])
+def get_all_users():
+    users = User.query.all()
+    return jsonify([{
+        'id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'role': user.role,
+        'created_at': user.created_at.isoformat()
+    } for user in users]), 200
+
+@app.route('/admin/budgets/pending', methods=['GET'])
+@role_required(['admin'])
+def get_pending_budgets():
+    pending_budgets = Budget.query.filter_by(status='pending').all()
+    return jsonify([{
+        'id': budget.id,
+        'category': budget.category,
+        'amount': budget.monthly_limit,
+        'user': budget.user.username,
+        'created_at': budget.created_at.isoformat()
+    } for budget in pending_budgets]), 200
+
+@app.route('/admin/stats', methods=['GET'])
+@role_required(['admin'])
+def get_system_stats():
+    stats = {
+        'totalUsers': User.query.count(),
+        'activeBudgets': Budget.query.count(),
+        'pendingBudgets': Budget.query.filter_by(status='pending').count(),
+        'storageUsed': 65,  # Replace with actual storage calculation
+        'userGrowth': [
+            {'month': 'Jan', 'users': 45},
+            {'month': 'Feb', 'users': 68},
+            {'month': 'Mar', 'users': 92}
+        ],
+        'budgetDistribution': [
+            {'name': 'Approved', 'value': Budget.query.filter_by(status='approved').count()},
+            {'name': 'Pending', 'value': Budget.query.filter_by(status='pending').count()},
+            {'name': 'Rejected', 'value': Budget.query.filter_by(status='rejected').count()}
+        ],
+        'storageUsage': [
+            {'department': 'Finance', 'usage': 45},
+            {'department': 'Engineering', 'usage': 30},
+            {'department': 'Marketing', 'usage': 25}
+        ]
+    }
+    return jsonify(stats), 200
+
+@app.route('/admin/users/<string:user_id>', methods=['PUT'])
+@role_required(['admin'])
+def update_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+    
+    data = request.get_json()
+    if 'role' in data:
+        user.role = data['role']
+    if 'email' in data:
+        user.email = data['email']
+    
+    db.session.commit()
+    return jsonify({
+        'message': 'User updated successfully',
+        'user': {
+            'id': user.id,
+            'username': user.username,
+            'role': user.role
+        }
+    }), 200
+
+    
+
+@app.route('/admin/users/<string:user_id>', methods=['DELETE'])
+@role_required(['admin'])
+def delete_user(user_id):
+    if user_id == get_jwt_identity()['id']:
+        return jsonify({'message': 'Cannot delete yourself'}), 400
+    
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'message': 'User not found'}), 404
+    
+    db.session.delete(user)
+    db.session.commit()
+    
+    return jsonify({'message': 'User deleted successfully'}), 200
+
+
+
+
+@app.route("/reset-password", methods=["POST"])
+@limiter.limit("3 per hour")
+def request_password_reset():
+    email = request.json.get("email")
+    user = User.query.filter_by(email=email).first()
+    
+    if user:
+        reset_token = create_access_token(
+            identity=user.id,
+            expires_delta=timedelta(minutes=30)
+        )
+        # Send email with reset link
+        send_reset_email(user.email, reset_token)
+        
+    return jsonify({"message": "If email exists, reset link sent"}), 200
+
+@app.route("/reset-password/<token>", methods=["POST"])
+def reset_password(token):
+    try:
+        user_id = decode_token(token)["sub"]
+        user = User.query.get(user_id)
+        new_password = bcrypt.hashpw(request.json["password"].encode(), bcrypt.gensalt())
+        user.password = new_password.decode()
+        db.session.commit()
+        return jsonify({"message": "Password updated"}), 200
+    except:
+        return jsonify({"message": "Invalid token"}), 400
+
+# # --------------------------
 # Budget Routes
 # --------------------------
 
 @app.route("/budgets", methods=["GET", "POST"])
 @jwt_required()
 def manage_budgets():
-    current_user = get_jwt_identity()
-    
-    if request.method == "GET":
-        budgets = Budget.query.filter_by(user_id=current_user["id"]).all()
-        return jsonify(budget_schema.dump(budgets, many=True)), 200
-    
+    current_user_id = get_jwt_identity()
+
     if request.method == "POST":
         data = request.get_json()
-        new_budget = Budget(
-            id=str(uuid.uuid4()),
-            user_id=current_user["id"],
-            category=data["category"],
-            monthly_limit=data["monthly_limit"]
-        )
-        db.session.add(new_budget)
-        db.session.commit()
-        return jsonify(budget_schema.dump(new_budget)), 201
+        
+        if not data or "category" not in data or "monthly_limit" not in data:
+            return jsonify({"error": "Missing required fields"}), 400
+
+        try:
+            new_budget = Budget(
+                id=str(uuid.uuid4()),  # Generate a unique ID
+                user_id=current_user_id,  # Ensure the user ID is correct
+                category=data["category"],
+                monthly_limit=data["monthly_limit"],
+                current_spending=0  # Initialize spending at 0
+            )
+
+            db.session.add(new_budget)
+            db.session.commit()
+
+            return jsonify({
+                "id": new_budget.id,
+                "category": new_budget.category,
+                "monthly_limit": new_budget.monthly_limit,
+                "current_spending": new_budget.current_spending
+            }), 201
+
+        except Exception as e:
+            db.session.rollback()  # Rollback on error
+            return jsonify({"error": str(e)}), 500
+
+    if request.method == "GET":
+        budgets = Budget.query.filter_by(user_id=current_user_id).all()
+        
+        if not budgets:
+            return jsonify({"message": "No budgets found"}), 404
+
+        return jsonify([{
+            "id": budget.id,
+            "category": budget.category,
+            "monthly_limit": budget.monthly_limit,
+            "current_spending": budget.current_spending
+        } for budget in budgets]), 200
+
+
 
 # --------------------------
 # Expense Routes
@@ -274,7 +475,17 @@ def manage_expenses():
         
         if not budget or budget.user_id != current_user["id"]:
             return jsonify({"message": "Budget not found"}), 404
-            
+
+
+        # Ensure `current_spending` is always defined
+        if budget.current_spending is None:
+            budget.current_spending = 0
+
+        # Prevent overspending
+        if budget.current_spending + data["amount"] > budget.monthly_limit:
+            return jsonify({"message": "This expense exceeds your budget limit!"}), 400
+
+
         new_expense = Expense(
             id=str(uuid.uuid4()),
             user_id=current_user["id"],
@@ -611,19 +822,6 @@ def mpesa_callback():
         # Payment failed or canceled
         return jsonify({"message": f"Payment failed: {result_desc}"}), 400
 
-
-
-
-
-# --------------------------
-# Admin Routes
-# --------------------------
-
-@app.route('/admin/users', methods=['GET'])
-@role_required(['admin'])
-def get_all_users():
-    users = User.query.all()
-    return jsonify(user_schema.dump(users, many=True)), 200
 
 # --------------------------
 # Main Application
