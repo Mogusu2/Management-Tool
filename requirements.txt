@@ -6,6 +6,11 @@ certifi==2025.1.31; python_version >= '3.6'
 charset-normalizer==3.4.1; python_version >= '3.7'
 click==8.1.8; python_version >= '3.7'
 flask==3.1.0; python_version >= '3.9'
+flask-cors==4.0.1
+flask-jwt-extended==4.6.0
+flask-limiter==3.5.0
+flask-mail==0.9.1
+flask-marshmallow==1.2.1
 flask-migrate==4.1.0; python_version >= '3.6'
 flask-restful==0.3.10
 flask-sqlalchemy==3.1.1; python_version >= '3.8'
@@ -27,3 +32,10 @@ sqlalchemy-serializer==1.4.22; python_version >= '3.10' and python_version < '4.
 typing-extensions==4.12.2; python_version >= '3.8'
 urllib3==2.3.0; python_version >= '3.9'
 werkzeug==3.1.3; python_version >= '3.9'
+
+# Additional dependencies from imports
+bcrypt==4.1.2
+python-dotenv==1.0.1
+paypalrestsdk==1.14.0
+reportlab==4.1.0
+jwt==1.3.1
