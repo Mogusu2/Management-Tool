@@ -7,7 +7,9 @@ charset-normalizer==3.4.1; python_version >= '3.7'
 click==8.1.8; python_version >= '3.7'
 flask==3.1.0; python_version >= '3.9'
 flask-cors==4.0.1
-flask-jwt-extended==4.6.0
+marshmallow-sqlalchemy
+flask-jwt-extended
+pyjwt==2.4.0
 flask-limiter==3.5.0
 flask-mail==0.9.1
 flask-marshmallow==1.2.1
