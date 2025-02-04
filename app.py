@@ -240,6 +240,23 @@ def generate_token(user):
     return access_token
 
 
+@app.route('/verify-token', methods=['GET'])
+@jwt_required()
+def verify_token():
+    current_user = get_jwt_identity()
+    user = User.query.get(current_user['id'])
+    if not user:
+        return jsonify({"valid": False}), 401
+    return jsonify({
+        "valid": True,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role
+        }
+    }), 200
+
+
 @app.route("/login", methods=["POST"])
 def login():
     try:
@@ -249,22 +266,19 @@ def login():
         if not user or not bcrypt.checkpw(data["password"].encode("utf-8"), user.password.encode("utf-8")):
             return jsonify({"message": "Invalid credentials"}), 401
 
-        # Create token with explicit freshness
-        access_token = create_access_token(
-            identity={
-                "id": user.id,
-                "username": user.username,
-                "role": user.role
-            },
-            fresh=True,
-            expires_delta=timedelta(hours=1)
-        )
+        access_token = create_access_token(identity={
+            "id": user.id,
+            "username": user.username,
+            "role": user.role
+        })
 
+        # Standardized response format
         return jsonify({
             "access_token": access_token,
             "user": {
                 "id": user.id,
                 "username": user.username,
+                "email": user.email,
                 "role": user.role
             }
         }), 200
@@ -274,10 +288,6 @@ def login():
         return jsonify({"message": "Server error"}), 500
 
 
-
-# --------------------------
-# Admin Routes
-# --------------------------
 # --------------------------
 # Admin Routes
 # --------------------------
