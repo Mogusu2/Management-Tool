@@ -16,8 +16,9 @@ from flask_cors import CORS
 from flask_mail import Mail, Message
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-from jwt.exceptions import ExpiredSignatureError, InvalidTokenError
+
 from flask_jwt_extended.exceptions import NoAuthorizationError
+from flask_jwt_extended import decode_token
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from functools import wraps
@@ -838,4 +839,4 @@ def mpesa_callback():
 # --------------------------
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run()
